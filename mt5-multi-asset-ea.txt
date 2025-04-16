@@ -1,0 +1,859 @@
+//+------------------------------------------------------------------+
+//|                  Multi-Asset Scalping EA                          |
+//|                Copyright 2025, Trading Systems Inc.               |
+//|                      https://www.tradingsystems.com               |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Trading Systems Inc."
+#property link      "https://www.tradingsystems.com"
+#property version   "1.00"
+#property strict
+
+// Input Parameters - General Settings
+input string          GeneralSettings    = "==== General Settings ====";  // General Settings Section
+input double          LotSize            = 0.01;                          // Trading lot size
+input bool            AutoLotSize        = false;                         // Use automatic lot sizing
+input double          RiskPercent        = 1.0;                           // Risk percent for auto lot size
+input int             Slippage           = 3;                             // Maximum allowed slippage in points
+input int             Magic              = 123456;                        // EA magic number (unique identifier)
+input bool            UseTradePanel      = true;                          // Show trading information panel
+input bool            EnableNotifications = false;                        // Enable push notifications
+input bool            EnableAlerts       = true;                          // Enable sound alerts
+input bool            EnableEmailAlerts  = false;                         // Enable email alerts
+
+// Input Parameters - Trading Logic
+input string          TradingParams      = "==== Trading Parameters ====";  // Trading Parameters Section
+input int             FastEMA            = 8;                             // Fast EMA period
+input int             SlowEMA            = 21;                            // Slow EMA period
+input int             SignalEMA          = 5;                             // Signal line period
+input double          RSIPeriod          = 14;                            // RSI period
+input double          RSIOverbought      = 70;                            // RSI overbought level
+input double          RSIOversold        = 30;                            // RSI oversold level
+input int             ADXPeriod          = 14;                            // ADX period
+input int             ADXThreshold       = 25;                            // ADX trend strength threshold
+input int             ATRPeriod          = 14;                            // ATR period for volatility measurement
+input double          ATRMultiplier      = 1.5;                           // ATR multiplier for SL/TP
+
+// Input Parameters - Strategy Settings
+input string          StrategySettings   = "==== Strategy Settings ====";  // Strategy Settings Section
+input bool            UseFixedSLTP       = false;                         // Use fixed SL/TP values instead of ATR-based
+input int             StopLoss           = 50;                            // Fixed stop loss in points (if UseFixedSLTP = true)
+input int             TakeProfit         = 80;                            // Fixed take profit in points (if UseFixedSLTP = true)
+input bool            UseTrailingStop    = true;                          // Use trailing stop
+input int             TrailingStop       = 30;                            // Trailing stop in points
+input int             TrailingStep       = 10;                            // Trailing step in points
+input bool            UseBreakEven       = true;                          // Use break-even
+input int             BreakEvenPoints    = 25;                            // Points in profit to move SL to breakeven
+input int             BreakEvenProfit    = 5;                             // Profit locked after breakeven in points
+input bool            UseMartingale      = false;                         // Use martingale strategy
+input double          MartingaleFactor   = 1.5;                           // Martingale lot multiplier
+input int             MaxTrades          = 5;                             // Maximum number of trades
+
+// Input Parameters - Time Filters
+input string          TimeSettings       = "==== Time Filters ====";      // Trading Time Settings Section
+input bool            UseTimeFilter      = false;                         // Use trading time filter
+input int             StartHour          = 8;                             // Trading start hour (0-23)
+input int             StartMinute        = 0;                             // Trading start minute (0-59)
+input int             EndHour            = 20;                            // Trading end hour (0-23)
+input int             EndMinute          = 0;                             // Trading end minute (0-59)
+input bool            TradeMondayOnly    = false;                         // Trade on Monday only
+input bool            TradeFridayOnly    = false;                         // Trade on Friday only
+input bool            AvoidFridayEnd     = true;                          // Avoid trading at Friday end (after 20:00)
+
+// Input Parameters - Asset-Specific Settings
+input string          AssetSettings      = "==== Asset Specific Settings ====";  // Asset Settings Section
+input bool            IsXAUUSD           = false;                         // Set to true when trading XAUUSD
+input bool            IsBTCUSD           = false;                         // Set to true when trading BTCUSD
+input bool            IsForex            = true;                          // Set to true when trading Forex pairs
+input double          XAUUSDMultiplier   = 1.5;                           // Multiplier for XAUUSD SL/TP
+input double          BTCUSDMultiplier   = 2.0;                           // Multiplier for BTCUSD SL/TP
+input double          ForexMultiplier    = 1.0;                           // Multiplier for Forex pairs SL/TP
+
+// Global Variables
+int g_ticket = 0;                                                         // Current trade ticket
+double g_point;                                                           // Symbol point value
+int g_digits;                                                             // Symbol digits
+int g_stopLevel;                                                          // Broker's stop level in points
+double g_lotStep;                                                         // Symbol lot step
+double g_minLot;                                                          // Symbol minimum lot
+double g_maxLot;                                                          // Symbol maximum lot
+double g_tickValue;                                                       // Value of a tick
+bool g_isNewBar = false;                                                  // Flag for new bar
+datetime g_lastBarTime = 0;                                               // Time of the last bar
+int g_consecutiveLosses = 0;                                              // Counter for consecutive losses
+double g_lastLotSize = 0;                                                 // Last used lot size
+int g_tradeCount = 0;                                                     // Number of trades opened by EA
+bool g_isTradeAllowed = true;                                             // Flag for trading permission
+
+// Buffers for indicators
+double g_fastEMA[], g_slowEMA[], g_signalEMA[];
+double g_rsi[], g_adx[], g_plusDI[], g_minusDI[], g_atr[];
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Initialize symbol-specific variables
+   g_digits = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+   g_point = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
+   g_stopLevel = (int)SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL);
+   g_lotStep = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_STEP);
+   g_minLot = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MIN);
+   g_maxLot = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MAX);
+   g_tickValue = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
+   
+   // Adjust g_point for 5-digit brokers (Forex pairs)
+   if (g_digits == 3 || g_digits == 5)
+      g_point *= 10;
+   
+   // Verify input parameters
+   if (!ValidateInputs())
+      return INIT_PARAMETERS_INCORRECT;
+   
+   // Initialize indicator buffers
+   ArraySetAsSeries(g_fastEMA, true);
+   ArraySetAsSeries(g_slowEMA, true);
+   ArraySetAsSeries(g_signalEMA, true);
+   ArraySetAsSeries(g_rsi, true);
+   ArraySetAsSeries(g_adx, true);
+   ArraySetAsSeries(g_plusDI, true);
+   ArraySetAsSeries(g_minusDI, true);
+   ArraySetAsSeries(g_atr, true);
+   
+   // Display EA information
+   Comment("Multi-Asset Scalping EA initialized successfully!\n",
+           "Symbol: ", Symbol(), "\n",
+           "Current timeframe: ", GetTimeframeStr(Period()), "\n",
+           "Point value: ", g_point, "\n",
+           "Asset type: ", GetAssetType());
+   
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   Comment("");  // Clear the comment
+   
+   // Clean up
+   ArrayFree(g_fastEMA);
+   ArrayFree(g_slowEMA);
+   ArrayFree(g_signalEMA);
+   ArrayFree(g_rsi);
+   ArrayFree(g_adx);
+   ArrayFree(g_plusDI);
+   ArrayFree(g_minusDI);
+   ArrayFree(g_atr);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   // Check for a new bar
+   if (IsNewBar())
+   {
+      // Update the status on chart
+      if (UseTradePanel)
+         DisplayInfo();
+      
+      // Check if trading is allowed
+      if (!IsTradeAllowed())
+         return;
+      
+      // Calculate indicators
+      CalculateIndicators();
+      
+      // Check for open positions
+      int totalPositions = CalculateOpenPositions();
+      
+      // Manage open positions
+      if (totalPositions > 0)
+      {
+         ManagePositions();
+      }
+      
+      // Check for new trade signals
+      if (totalPositions < MaxTrades)
+      {
+         CheckForTradeSignals();
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check if a new bar has formed                                    |
+//+------------------------------------------------------------------+
+bool IsNewBar()
+{
+   datetime currentBarTime = iTime(Symbol(), Period(), 0);
+   
+   if (currentBarTime != g_lastBarTime)
+   {
+      g_lastBarTime = currentBarTime;
+      g_isNewBar = true;
+      return true;
+   }
+   
+   g_isNewBar = false;
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate all indicators                                         |
+//+------------------------------------------------------------------+
+void CalculateIndicators()
+{
+   int counted_bars = 100; // Number of bars to calculate
+   
+   // Calculate EMAs
+   for (int i = 0; i < counted_bars; i++)
+   {
+      g_fastEMA[i] = iMA(Symbol(), Period(), FastEMA, 0, MODE_EMA, PRICE_CLOSE, i);
+      g_slowEMA[i] = iMA(Symbol(), Period(), SlowEMA, 0, MODE_EMA, PRICE_CLOSE, i);
+      g_signalEMA[i] = iMA(Symbol(), Period(), SignalEMA, 0, MODE_EMA, PRICE_CLOSE, i);
+   }
+   
+   // Calculate RSI
+   for (int i = 0; i < counted_bars; i++)
+   {
+      g_rsi[i] = iRSI(Symbol(), Period(), RSIPeriod, PRICE_CLOSE, i);
+   }
+   
+   // Calculate ADX
+   for (int i = 0; i < counted_bars; i++)
+   {
+      g_adx[i] = iADX(Symbol(), Period(), ADXPeriod, PRICE_CLOSE, MODE_MAIN, i);
+      g_plusDI[i] = iADX(Symbol(), Period(), ADXPeriod, PRICE_CLOSE, MODE_PLUSDI, i);
+      g_minusDI[i] = iADX(Symbol(), Period(), ADXPeriod, PRICE_CLOSE, MODE_MINUSDI, i);
+   }
+   
+   // Calculate ATR
+   for (int i = 0; i < counted_bars; i++)
+   {
+      g_atr[i] = iATR(Symbol(), Period(), ATRPeriod, i);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check for buy and sell signals                                   |
+//+------------------------------------------------------------------+
+void CheckForTradeSignals()
+{
+   // Check for buy signal
+   if (IsBuySignal())
+   {
+      OpenPosition(OP_BUY);
+   }
+   // Check for sell signal
+   else if (IsSellSignal())
+   {
+      OpenPosition(OP_SELL);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check for buy signal conditions                                  |
+//+------------------------------------------------------------------+
+bool IsBuySignal()
+{
+   // Trend confirmation: Fast EMA above Slow EMA
+   bool trendCondition = g_fastEMA[1] > g_slowEMA[1] && g_fastEMA[0] > g_slowEMA[0];
+   
+   // RSI condition: RSI crossed above oversold
+   bool rsiCondition = g_rsi[1] < RSIOversold && g_rsi[0] > RSIOversold;
+   
+   // ADX condition: Strong trend (ADX > threshold)
+   bool adxCondition = g_adx[0] > ADXThreshold && g_plusDI[0] > g_minusDI[0];
+   
+   // Signal confirmation: Price crossed above Signal EMA
+   bool signalCondition = Close[1] < g_signalEMA[1] && Close[0] > g_signalEMA[0];
+   
+   // Combine conditions based on asset type
+   if (IsXAUUSD)
+   {
+      return trendCondition && (rsiCondition || signalCondition) && adxCondition;
+   }
+   else if (IsBTCUSD)
+   {
+      return trendCondition && rsiCondition && g_adx[0] > ADXThreshold * 0.8;
+   }
+   else  // Forex
+   {
+      return trendCondition && (rsiCondition || adxCondition) && signalCondition;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check for sell signal conditions                                 |
+//+------------------------------------------------------------------+
+bool IsSellSignal()
+{
+   // Trend confirmation: Fast EMA below Slow EMA
+   bool trendCondition = g_fastEMA[1] < g_slowEMA[1] && g_fastEMA[0] < g_slowEMA[0];
+   
+   // RSI condition: RSI crossed below overbought
+   bool rsiCondition = g_rsi[1] > RSIOverbought && g_rsi[0] < RSIOverbought;
+   
+   // ADX condition: Strong trend (ADX > threshold)
+   bool adxCondition = g_adx[0] > ADXThreshold && g_minusDI[0] > g_plusDI[0];
+   
+   // Signal confirmation: Price crossed below Signal EMA
+   bool signalCondition = Close[1] > g_signalEMA[1] && Close[0] < g_signalEMA[0];
+   
+   // Combine conditions based on asset type
+   if (IsXAUUSD)
+   {
+      return trendCondition && (rsiCondition || signalCondition) && adxCondition;
+   }
+   else if (IsBTCUSD)
+   {
+      return trendCondition && rsiCondition && g_adx[0] > ADXThreshold * 0.8;
+   }
+   else  // Forex
+   {
+      return trendCondition && (rsiCondition || adxCondition) && signalCondition;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Open a new position                                              |
+//+------------------------------------------------------------------+
+void OpenPosition(int cmd)
+{
+   // Calculate lot size
+   double lots = CalculateLotSize(cmd);
+   
+   // Calculate SL and TP levels
+   double sl = CalculateStopLoss(cmd);
+   double tp = CalculateTakeProfit(cmd);
+   
+   string orderType = (cmd == OP_BUY) ? "BUY" : "SELL";
+   double openPrice = (cmd == OP_BUY) ? Ask : Bid;
+   
+   g_ticket = OrderSend(Symbol(), cmd, lots, openPrice, Slippage, sl, tp, 
+                        "Multi-Asset EA " + orderType, Magic, 0, 
+                        cmd == OP_BUY ? clrGreen : clrRed);
+   
+   if (g_ticket > 0)
+   {
+      g_tradeCount++;
+      g_lastLotSize = lots;
+      
+      // Send notifications if enabled
+      if (EnableAlerts)
+         Alert("New ", orderType, " position opened at ", openPrice, ", SL: ", sl, ", TP: ", tp);
+      
+      if (EnableNotifications)
+         SendNotification("Multi-Asset EA: New " + orderType + " position opened at " + DoubleToString(openPrice, g_digits));
+      
+      if (EnableEmailAlerts)
+         SendMail("Multi-Asset EA Trade Alert", "New " + orderType + " position opened at " + DoubleToString(openPrice, g_digits));
+   }
+   else
+   {
+      int error = GetLastError();
+      Print("Error opening ", orderType, " position: ", ErrorDescription(error), " (", error, ")");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate appropriate lot size based on strategy                 |
+//+------------------------------------------------------------------+
+double CalculateLotSize(int cmd)
+{
+   double lotSize = LotSize;
+   
+   // Use automatic lot sizing based on risk percentage
+   if (AutoLotSize)
+   {
+      double riskAmount = AccountBalance() * RiskPercent / 100;
+      double stopLossPoints;
+      
+      if (UseFixedSLTP)
+      {
+         stopLossPoints = StopLoss * g_point;
+      }
+      else
+      {
+         // Calculate ATR-based stop loss points
+         double atrValue = g_atr[0];
+         double multiplier = GetAssetMultiplier();
+         stopLossPoints = atrValue * ATRMultiplier * multiplier;
+      }
+      
+      if (stopLossPoints > 0)
+      {
+         double tickSize = g_tickValue / g_lotStep;
+         lotSize = NormalizeDouble(riskAmount / (stopLossPoints * tickSize), 2);
+      }
+   }
+   
+   // Apply martingale if enabled and there was a previous loss
+   if (UseMartingale && g_consecutiveLosses > 0 && g_lastLotSize > 0)
+   {
+      lotSize = g_lastLotSize * MathPow(MartingaleFactor, g_consecutiveLosses);
+   }
+   
+   // Ensure lot size is within allowed limits
+   lotSize = MathMax(g_minLot, MathMin(g_maxLot, lotSize));
+   lotSize = NormalizeDouble(lotSize, 2);
+   
+   return lotSize;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate stop loss level for a position                         |
+//+------------------------------------------------------------------+
+double CalculateStopLoss(int cmd)
+{
+   // Default SL value
+   double sl = 0;
+   
+   if (UseFixedSLTP)
+   {
+      // Fixed SL
+      if (cmd == OP_BUY)
+         sl = NormalizeDouble(Ask - StopLoss * g_point, g_digits);
+      else
+         sl = NormalizeDouble(Bid + StopLoss * g_point, g_digits);
+   }
+   else
+   {
+      // ATR-based SL
+      double atrValue = g_atr[0];
+      double multiplier = GetAssetMultiplier();
+      
+      if (cmd == OP_BUY)
+         sl = NormalizeDouble(Ask - atrValue * ATRMultiplier * multiplier, g_digits);
+      else
+         sl = NormalizeDouble(Bid + atrValue * ATRMultiplier * multiplier, g_digits);
+   }
+   
+   // Check minimum stop level required by broker
+   if (cmd == OP_BUY)
+   {
+      double minSL = NormalizeDouble(Ask - g_stopLevel * g_point, g_digits);
+      sl = MathMin(sl, minSL);
+   }
+   else
+   {
+      double minSL = NormalizeDouble(Bid + g_stopLevel * g_point, g_digits);
+      sl = MathMax(sl, minSL);
+   }
+   
+   return sl;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate take profit level for a position                       |
+//+------------------------------------------------------------------+
+double CalculateTakeProfit(int cmd)
+{
+   // Default TP value
+   double tp = 0;
+   
+   if (UseFixedSLTP)
+   {
+      // Fixed TP
+      if (cmd == OP_BUY)
+         tp = NormalizeDouble(Ask + TakeProfit * g_point, g_digits);
+      else
+         tp = NormalizeDouble(Bid - TakeProfit * g_point, g_digits);
+   }
+   else
+   {
+      // ATR-based TP
+      double atrValue = g_atr[0];
+      double multiplier = GetAssetMultiplier();
+      
+      if (cmd == OP_BUY)
+         tp = NormalizeDouble(Ask + atrValue * ATRMultiplier * multiplier * 1.5, g_digits);
+      else
+         tp = NormalizeDouble(Bid - atrValue * ATRMultiplier * multiplier * 1.5, g_digits);
+   }
+   
+   // Check minimum stop level required by broker
+   if (cmd == OP_BUY)
+   {
+      double minTP = NormalizeDouble(Ask + g_stopLevel * g_point, g_digits);
+      tp = MathMax(tp, minTP);
+   }
+   else
+   {
+      double minTP = NormalizeDouble(Bid - g_stopLevel * g_point, g_digits);
+      tp = MathMin(tp, minTP);
+   }
+   
+   return tp;
+}
+
+//+------------------------------------------------------------------+
+//| Get the appropriate multiplier for the current asset             |
+//+------------------------------------------------------------------+
+double GetAssetMultiplier()
+{
+   if (IsXAUUSD)
+      return XAUUSDMultiplier;
+   else if (IsBTCUSD)
+      return BTCUSDMultiplier;
+   else
+      return ForexMultiplier;
+}
+
+//+------------------------------------------------------------------+
+//| Manage open positions (trailing stop, breakeven)                 |
+//+------------------------------------------------------------------+
+void ManagePositions()
+{
+   for (int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+      {
+         if (OrderSymbol() == Symbol() && OrderMagicNumber() == Magic)
+         {
+            // Apply trailing stop if enabled
+            if (UseTrailingStop && TrailingStop > 0)
+            {
+               ApplyTrailingStop(OrderTicket(), OrderType(), TrailingStop, TrailingStep);
+            }
+            
+            // Apply breakeven if enabled
+            if (UseBreakEven && BreakEvenPoints > 0)
+            {
+               ApplyBreakEven(OrderTicket(), OrderType(), BreakEvenPoints, BreakEvenProfit);
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Apply trailing stop to a position                                |
+//+------------------------------------------------------------------+
+void ApplyTrailingStop(int ticket, int type, int trailingPoints, int step)
+{
+   if (!OrderSelect(ticket, SELECT_BY_TICKET))
+      return;
+   
+   double trailingLevel = trailingPoints * g_point;
+   double stepLevel = step * g_point;
+   
+   double currentSL = OrderStopLoss();
+   double openPrice = OrderOpenPrice();
+   
+   // For BUY positions
+   if (type == OP_BUY)
+   {
+      double newSL = NormalizeDouble(Bid - trailingLevel, g_digits);
+      
+      // Only move stop loss if price has moved favorably by at least the step amount
+      if (Bid - openPrice > trailingLevel && (currentSL == 0 || newSL > currentSL + stepLevel))
+      {
+         if (!OrderModify(ticket, openPrice, newSL, OrderTakeProfit(), 0, clrGreen))
+         {
+            Print("Error modifying BUY order trailing stop: ", ErrorDescription(GetLastError()));
+         }
+      }
+   }
+   // For SELL positions
+   else if (type == OP_SELL)
+   {
+      double newSL = NormalizeDouble(Ask + trailingLevel, g_digits);
+      
+      // Only move stop loss if price has moved favorably by at least the step amount
+      if (openPrice - Ask > trailingLevel && (currentSL == 0 || newSL < currentSL - stepLevel))
+      {
+         if (!OrderModify(ticket, openPrice, newSL, OrderTakeProfit(), 0, clrRed))
+         {
+            Print("Error modifying SELL order trailing stop: ", ErrorDescription(GetLastError()));
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Apply breakeven to a position                                    |
+//+------------------------------------------------------------------+
+void ApplyBreakEven(int ticket, int type, int breakEvenPoints, int lockProfit)
+{
+   if (!OrderSelect(ticket, SELECT_BY_TICKET))
+      return;
+   
+   double currentSL = OrderStopLoss();
+   double openPrice = OrderOpenPrice();
+   double breakEvenLevel = breakEvenPoints * g_point;
+   double profitLock = lockProfit * g_point;
+   
+   // For BUY positions
+   if (type == OP_BUY)
+   {
+      // Only apply breakeven if current SL is not at breakeven yet and price has moved enough
+      if (Bid - openPrice >= breakEvenLevel && (currentSL < openPrice + profitLock))
+      {
+         double newSL = NormalizeDouble(openPrice + profitLock, g_digits);
+         
+         if (!OrderModify(ticket, openPrice, newSL, OrderTakeProfit(), 0, clrGreen))
+         {
+            Print("Error modifying BUY order breakeven: ", ErrorDescription(GetLastError()));
+         }
+      }
+   }
+   // For SELL positions
+   else if (type == OP_SELL)
+   {
+      // Only apply breakeven if current SL is not at breakeven yet and price has moved enough
+      if (openPrice - Ask >= breakEvenLevel && (currentSL > openPrice - profitLock))
+      {
+         double newSL = NormalizeDouble(openPrice - profitLock, g_digits);
+         
+         if (!OrderModify(ticket, openPrice, newSL, OrderTakeProfit(), 0, clrRed))
+         {
+            Print("Error modifying SELL order breakeven: ", ErrorDescription(GetLastError()));
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate total number of open positions for this EA             |
+//+------------------------------------------------------------------+
+int CalculateOpenPositions()
+{
+   int count = 0;
+   
+   for (int i = 0; i < OrdersTotal(); i++)
+   {
+      if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+      {
+         if (OrderSymbol() == Symbol() && OrderMagicNumber() == Magic)
+         {
+            count++;
+            
+            // Update consecutive losses counter based on closed orders
+            if (OrderProfit() < 0)
+            {
+               g_consecutiveLosses++;
+            }
+            else
+            {
+               g_consecutiveLosses = 0;
+            }
+         }
+      }
+   }
+   
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| Check if trading is allowed based on time filters                |
+//+------------------------------------------------------------------+
+bool IsTradeAllowed()
+{
+   // Check if trading is allowed by the terminal
+   if (!IsTradeAllowed(Symbol(), TimeCurrent()))
+   {
+      Print("Trading is not allowed by the terminal");
+      return false;
+   }
+   
+   // Check time filter if enabled
+   if (UseTimeFilter)
+   {
+      datetime now = TimeCurrent();
+      int hour = TimeHour(now);
+      int minute = TimeMinute(now);
+      int currentTimeInMinutes = hour * 60 + minute;
+      int startTimeInMinutes = StartHour * 60 + StartMinute;
+      int endTimeInMinutes = EndHour * 60 + EndMinute;
+      
+      // Handle case when end time is on the next day
+      if (endTimeInMinutes < startTimeInMinutes)
+         endTimeInMinutes += 24 * 60;
+      
+      // Check if current time is outside trading hours
+      if (currentTimeInMinutes < startTimeInMinutes || currentTimeInMinutes >= endTimeInMinutes)
+      {
+         return false;
+      }
+   }
+   
+   // Check day filters
+   if (TradeMondayOnly || TradeFridayOnly || AvoidFridayEnd)
+   {
+      datetime now = TimeCurrent();
+      int dayOfWeek = TimeDayOfWeek(now);
+      
+      // Check Monday only filter
+      if (TradeMondayOnly && dayOfWeek != 1)
+      {
+         return false;
+      }
+      
+      // Check Friday only filter
+      if (TradeFridayOnly && dayOfWeek != 5)
+      {
+         return false;
+      }
+      
+      // Check Friday end filter
+      if (AvoidFridayEnd && dayOfWeek == 5)
+      {
+         int hour = TimeHour(now);
+         if (hour >= 20)  // After 20:00 on Friday
+         {
+            return false;
+         }
+      }
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Display information on the chart                                 |
+//+------------------------------------------------------------------+
+void DisplayInfo()
+{
+   string info = "Multi-Asset Scalping EA\n";
+   info += "------------------------------\n";
+   info += "Symbol: " + Symbol() + "\n";
+   info += "Timeframe: " + GetTimeframeStr(Period()) + "\n";
+   info += "Asset type: " + GetAssetType() + "\n";
+   info += "Server time: " + TimeToString(TimeCurrent(), TIME_MINUTES) + "\n";
+   info += "------------------------------\n";
+   info += "Account balance: " + DoubleToString(AccountBalance(), 2) + " " + AccountCurrency() + "\n";
+   info += "Account equity: " + DoubleToString(AccountEquity(), 2) + " " + AccountCurrency() + "\n";
+   info += "Total profit: " + DoubleToString(AccountEquity() - AccountBalance(), 2) + " " + AccountCurrency() + "\n";
+   info += "------------------------------\n";
+   info += "Fast EMA: " + DoubleToString(g_fastEMA[0], g_digits) + "\n";
+   info += "Slow EMA: " + DoubleToString(g_slowEMA[0], g_digits) + "\n";
+   info += "RSI: " + DoubleToString(g_rsi[0], 2) + "\n";
+   info += "ADX: " + DoubleToString(g_adx[0], 2) + "\n";
+   info += "ATR: " + DoubleToString(g_atr[0], g_digits) + "\n";
+   info += "------------------------------\n";
+   info += "Active trades: " + IntegerToString(CalculateOpenPositions()) + "\n";
+   info += "Total trades: " + IntegerToString(g_tradeCount) + "\n";
+   info += "Trading allowed: " + (g_isTradeAllowed ? "Yes" : "No") + "\n";
+   
+   Comment(info);
+}
+
+//+------------------------------------------------------------------+
+//| Get the timeframe as a readable string                           |
+//+------------------------------------------------------------------+
+string GetTimeframeStr(int timeframe)
+{
+   switch(timeframe)
+   {
+      case PERIOD_M1:  return "M1";
+      case PERIOD_M5:  return "M5";
+      case PERIOD_M15: return "M15";
+      case PERIOD_M30: return "M30";
+      case PERIOD_H1:  return "H1";
+      case PERIOD_H4:  return "H4";
+      case PERIOD_D1:  return "D1";
+      case PERIOD_W1:  return "W1";
+      case PERIOD_MN1: return "MN";
+      default:         return "Unknown";
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Get the asset type as a string                                   |
+//+------------------------------------------------------------------+
+string GetAssetType()
+{
+   if (IsXAUUSD)
+      return "XAUUSD (Gold)";
+   else if (IsBTCUSD)
+      return "BTCUSD (Bitcoin)";
+   else
+      return "Forex";
+}
+
+//+------------------------------------------------------------------+
+//| Validate input parameters                                         |
+//+------------------------------------------------------------------+
+bool ValidateInputs()
+{
+   // Check lot size
+   if (LotSize < g_minLot || LotSize > g_maxLot)
+   {
+      Print("Invalid lot size. Must be between ", g_minLot, " and ", g_maxLot);
+      return false;
+   }
+   
+   // Check risk percent
+   if (RiskPercent <= 0 || RiskPercent > 10)
+   {
+      Print("Invalid risk percent. Must be between 0.1 and 10");
+      return false;
+   }
+   
+   // Check if multiple asset settings are enabled
+   int assetCount = 0;
+   if (IsXAUUSD) assetCount++;
+   if (IsBTCUSD) assetCount++;
+   if (IsForex) assetCount++;
+   
+   if (assetCount != 1)
+   {
+      Print("Invalid asset settings. Enable exactly one asset type.");
+      return false;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Get formatted error description                                  |
+//+------------------------------------------------------------------+
+string ErrorDescription(int error_code)
+{
+   string error_string;
+   
+   switch(error_code)
+   {
+      case 0:   error_string = "No error";                                                  break;
+      case 1:   error_string = "No error, but the result is unknown";                       break;
+      case 2:   error_string = "Common error";                                              break;
+      case 3:   error_string = "Invalid trade parameters";                                  break;
+      case 4:   error_string = "Trade server is busy";                                      break;
+      case 5:   error_string = "Old version of the client terminal";                        break;
+      case 6:   error_string = "No connection with trade server";                           break;
+      case 7:   error_string = "Not enough rights";                                         break;
+      case 8:   error_string = "Too frequent requests";                                     break;
+      case 9:   error_string = "Malfunctional trade operation";                             break;
+      case 64:  error_string = "Account disabled";                                          break;
+      case 65:  error_string = "Invalid account";                                           break;
+      case 128: error_string = "Trade timeout";                                             break;
+      case 129: error_string = "Invalid price";                                             break;
+      case 130: error_string = "Invalid stops";                                             break;
+      case 131: error_string = "Invalid trade volume";                                      break;
+      case 132: error_string = "Market is closed";                                          break;
+      case 133: error_string = "Trade is disabled";                                         break;
+      case 134: error_string = "Not enough money";                                          break;
+      case 135: error_string = "Price changed";                                             break;
+      case 136: error_string = "Off quotes";                                                break;
+      case 137: error_string = "Broker is busy";                                            break;
+      case 138: error_string = "Requote";                                                   break;
+      case 139: error_string = "Order is locked";                                           break;
+      case 140: error_string = "Long positions only allowed";                               break;
+      case 141: error_string = "Too many requests";                                         break;
+      case 145: error_string = "Modification denied because order too close to market";     break;
+      case 146: error_string = "Trade context is busy";                                     break;
+      case 147: error_string = "Expirations are denied by broker";                          break;
+      case 148: error_string = "Amount of open and pending orders has reached the limit";   break;
+      case 149: error_string = "Hedging is prohibited";                                     break;
+      case 150: error_string = "Prohibited by FIFO rules";                                  break;
+      default:  error_string = "Unknown error";
+   }
+   
+   return error_string;
+}
+//+------------------------------------------------------------------+
